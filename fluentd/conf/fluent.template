@@ -1,0 +1,31 @@
+<source>
+  @type forward
+  port 24224
+  bind 0.0.0.0
+</source>
+<match *.**>
+  @type copy
+  <store>
+    @type elasticsearch
+    hosts es01:9200
+    scheme https
+    user elastic
+    password ES_PASSWORD
+    ca_file /etc/certs/ca/ca.crt
+    ssl_verify true
+    ssl_version TLSv1_3
+    include_tag_key true
+    type_name access_log
+    tag_key @log_name
+    flush_interval 5s
+    include_timestamp true
+    index_name ${tag_parts[0]}
+  </store>
+  <store>
+    @type stdout
+  </store>
+  <buffer tag>
+    @type memory # or file
+    flush_thread_count 4
+  </buffer>
+</match>

@@ -1,0 +1,15 @@
+FROM fluentd:v1.14.0-1.0
+
+USER root
+
+RUN apk add --update --virtual .build-deps \
+    build-base ruby-dev
+RUN fluent-gem install fluent-plugin-elasticsearch fluent-plugin-concat fluent-plugin-rewrite-tag-filter fluent-plugin-flowcounter fluent-plugin-ignore-filter \
+    && fluent-gem sources --clear-all \
+    && apk del .build-deps \
+    && rm -rf /var/cache/apk/* \
+    ~/.gem
+RUN sed -i 's/fluent:x:100:65533/fluent:x:UID:0/g' /etc/passwd \
+    && chown -R fluent /home/fluent
+
+USER fluent

@@ -1,0 +1,150 @@
+version: "3"
+services:
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:$ES_VERSION
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+    user: "0"
+    command: >
+      bash -c '
+        if [ x$ES_PASSWORD == x ]; then
+          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
+          exit 1;
+        elif [ x$KIBANA_PASSWORD == x ]; then
+          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
+          exit 1;
+        fi;
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "Creating CA";
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+          unzip config/certs/ca.zip -d config/certs;
+        fi;
+        if [ ! -f config/certs/certs.zip ]; then
+          echo "Creating certs";
+          echo -ne \
+          "instances:\n"\
+          "  - name: es01\n"\
+          "    dns:\n"\
+          "      - es01\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          > config/certs/instances.yml;
+          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
+          unzip config/certs/certs.zip -d config/certs;
+        fi;
+        echo "Setting file permissions"
+        chown -R root:root config/certs;
+        find . -type d -exec chmod 750 \{\} \;;
+        find . -type f -exec chmod 640 \{\} \;;
+        echo "Waiting for Elasticsearch availability";
+        until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
+        echo "Setting kibana_system password";
+        until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:$ES_PASSWORD" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"$KIBANA_PASSWORD\"}" | grep -q "^{}"; do sleep 10; done; echo "All done!";
+      '
+    networks:
+      - efk_net
+    healthcheck:
+      test: [ "CMD-SHELL", "[ -f config/certs/es01/es01.crt ]" ]
+      interval: 1s
+      timeout: 5s
+      retries: 120
+
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:$ES_VERSION
+    environment:
+      - discovery.type=single-node # single-node cluster
+      - cluster.name=elasticsearch
+      - node.name=es01
+      - bootstrap.memory_lock=true # along with the memlock settings below, disables swapping
+      - "ES_JAVA_OPTS=-Xms512m -Xmx2G" # minimum and maximum Java heap size, recommend setting both to 50% of system RAM
+      - ELASTIC_PASSWORD=$ES_PASSWORD
+      - xpack.security.enabled=$ES_SECURITY
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/es01/es01.key
+      - xpack.security.http.ssl.certificate=certs/es01/es01.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.http.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/es01/es01.key
+      - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - TZ="Asia/Shanghai"
+    ports:
+      - 9200:9200
+      - 9600:9600 # required for Performance Analyzer
+    expose:
+      - "9200"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 262144 # maximum number of open files for the Elasticsearch user, set to at least 65536 on modern systems
+        hard: 262144
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - elasticsearch:/usr/share/elasticsearch/data
+    depends_on:
+      - setup
+      # setup:
+      # condition: service_healthy
+    networks:
+      - efk_net
+
+  fluentd:
+    build: ./fluentd
+    volumes:
+      - ./fluentd/conf:/fluentd/etc:Z
+      - certs:/etc/certs
+    links:
+      - "es01"
+    restart: always
+    environment:
+      - TZ="Asia/Shanghai"
+    # container_name: fluentd
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+    depends_on:
+      - "es01"
+    networks:
+      - efk_net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:$ES_VERSION
+    links:
+      - "es01"
+    environment:
+      - TZ="Asia/Shanghai"
+      - SERVERNAME=kibana
+      - ELASTICSEARCH_HOSTS=https://es01:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+      - SERVER_SSL_ENABLED=true
+      - SERVER_SSL_CERTIFICATE=config/certs/ca/ca.crt
+      - SERVER_SSL_KEY=config/certs/ca/ca.key
+    volumes:
+      - certs:/usr/share/kibana/config/certs
+    ports:
+      - "5601:5601"
+    depends_on:
+      - "es01"
+    networks:
+      - efk_net
+
+volumes:
+  elasticsearch:
+    driver: local
+  certs:
+    driver: local
+
+networks:
+  efk_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "192.168.200.0/24"
